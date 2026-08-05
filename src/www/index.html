@@ -379,6 +379,20 @@
                 </td>
               </tr>
               <tr>
+                <td class="label">Reverse on Stop:</td>
+                <td>
+                  <input type="checkbox" id="reverseOnStop" name="reverseOnStop" value="yes" checked>
+                  <label for="reverseOnStop">Automatically reverse door on stop</label>
+                </td>
+              </tr>
+              <tr id="homekitStopDoorRow" style="display: none;">
+                <td class="label">Stop button:</td>
+                <td>
+                  <input type="checkbox" id="stopDoorHomeKit" name="stopDoorHomeKit" value="no" checked>
+                  <label for="stopDoorHomeKit">HomeKit door stop button</label>
+                </td>
+              </tr>
+              <tr>
                 <td colspan="2">&nbsp;</td>
               </tr>
               <tr id="homekitLightRow" style="display: none;">
@@ -552,6 +566,22 @@
                   <label for="obstFromStatus">Get obstruction from GDO status messages</label>
                 </td>
               </tr>
+              <tr id="encoderRow" style="display:none;">
+                <td></td>
+                <td>
+                  <input type="checkbox" id="encoderEnabled" name="encoderEnabled" onclick="toggleEncoderOptions()">
+                  <label for="encoderEnabled">Enable rotary encoder (replaces limit switches)</label>
+                  <div id="encoderOptions" style="display:none; margin-top:4px; margin-left:20px;">
+                    <input type="checkbox" id="encoderReversed" name="encoderReversed">
+                    <label for="encoderReversed">Reverse encoder direction</label>
+                    &nbsp;&nbsp;
+                    <span style="font-size:0.9em;">Steps:&nbsp;<span id="encSteps">--</span></span>
+                    &nbsp;&nbsp;
+                    <input type="button" id="resetEncoderCalBtn" value="Reset Calibration" onclick="resetEncoderCal()">
+                  </div>
+                </td>
+              </tr>
+
               <tr id="trWifiPhyMode" style="display: none">
                 <td class="label">WiFi Version:</td>
                 <td>

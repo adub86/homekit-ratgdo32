@@ -3,7 +3,7 @@
  * https://ratcloud.llc
  * https://github.com/PaulWieland/ratgdo
  *
- * Copyright (c) 2023-25 David A Kerr... https://github.com/dkerr64/
+ * Copyright (c) 2023-26 David A Kerr... https://github.com/dkerr64/
  * All Rights Reserved.
  * Licensed under terms of the GPL-3.0 License.
  *
@@ -38,6 +38,8 @@
 #ifdef ESP8266
 #include "cQueue.h"
 #endif // ESP8266
+
+#include "encoder.h"
 
 static const char *TAG = "ratgdo-comms";
 
@@ -311,6 +313,7 @@ uint32_t last_saved_code = 0;
 #define MAX_CODES_WITHOUT_FLASH_WRITE 10
 
 static _millis_t stopSentClosePending = 0;
+static _millis_t stopSentOpenPending = 0;
 
 /******************************* SECURITY 1.0 *********************************/
 #ifndef USE_GDOLIB
@@ -361,6 +364,11 @@ enum secplus1Codes : uint8_t
 
     Unknown = 0xFF // (when rx fails parity test)
 };
+static bool pendingLightOn = false;
+static bool pendingLightOff = false;
+static bool pendingLockOn = false;
+static bool pendingLockOff = false;
+static bool pendingDoorCommand = false;
 
 #define SEC1_CMD(s) (s == secplus1Codes::DoorButtonPress)      ? "door press"    \
                     : (s == secplus1Codes::DoorButtonRelease)  ? "door release"  \
@@ -373,6 +381,8 @@ enum secplus1Codes : uint8_t
 // prototypes
 bool process_PacketAction(PacketAction &pkt_ac);
 void door_command(DoorAction action);
+void door_command_open();
+void door_command_close();
 bool transmitSec1(byte toSend);
 bool transmitSec2(PacketAction &pkt_ac);
 void obstruction_timer();
@@ -953,6 +963,7 @@ void update_door_state(GarageDoorCurrentState current_state)
     _millis_t now = _millis();
 
     GarageDoorTargetState target_state = garage_door.target_state;
+    pendingDoorCommand = false;
 
     // Determine target state
     switch (current_state)
@@ -970,9 +981,10 @@ void update_door_state(GarageDoorCurrentState current_state)
         target_state = GarageDoorTargetState::TGT_CLOSED;
         break;
     case GarageDoorCurrentState::CURR_STOPPED:
-        target_state = (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING)
-                           ? GarageDoorTargetState::TGT_CLOSED
-                           : GarageDoorTargetState::TGT_OPEN;
+        if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING)
+            target_state = GarageDoorTargetState::TGT_CLOSED;
+        else if (garage_door.current_state == GarageDoorCurrentState::CURR_OPENING)
+            target_state = GarageDoorTargetState::TGT_OPEN;
         break;
     default:
         ESP_LOGE(TAG, "Update to unknown door state: %d", current_state);
@@ -1001,11 +1013,40 @@ void update_door_state(GarageDoorCurrentState current_state)
 
     case GarageDoorCurrentState::CURR_OPEN:
     case GarageDoorCurrentState::CURR_CLOSED:
+        // If timer that checks door completely opens/closes is active, cancel it.
+        checkDoorCompleted.detach();
+        break;
     case GarageDoorCurrentState::CURR_STOPPED:
         // If timer that checks door completely opens/closes is active, cancel it.
-        if (checkDoorCompleted.active())
+        checkDoorCompleted.detach();
+        if (stopSentClosePending || stopSentOpenPending)
         {
-            checkDoorCompleted.detach();
+            // One or other of these will always be zero...
+            // It can take up to two seconds for us to get stopped state from Sec+1.0 doors.
+            if (_millis() - (stopSentClosePending + stopSentOpenPending) < 2000)
+            {
+                // We sent a stop command, and have received a response from the GDO. So now will followup with the close or open command.
+                if (stopSentOpenPending)
+                {
+                    door_command_open();
+                    // Sec+2.0 doors seem to require the command to be sent twice immediately after a stop
+                    if (doorControlType == 2)
+                        door_command_open();
+                }
+                else if (stopSentClosePending)
+                {
+                    door_command_close();
+                    // Sec+2.0 doors seem to require the command to be sent twice immediately after a stop
+                    if (doorControlType == 2)
+                        door_command_close();
+                }
+            }
+            else
+            {
+                ESP_LOGI(TAG, "Door did not respond to our stop command in time (2 seconds), do not send door command");
+            }
+            stopSentClosePending = 0;
+            stopSentOpenPending = 0;
         }
         break;
     default:
@@ -1062,7 +1103,7 @@ void update_door_state(GarageDoorCurrentState current_state)
             ESP_LOGW(TAG, "Ignoring implausibly short or long close duration: %lums (%s)", (uint32_t)duration, timeString());
         }
     }
-    else if ((current_state == CURR_STOPPED) ||
+    else if ((current_state == CURR_STOPPED && (start_opening > 0 || start_closing > 0)) ||
              (current_state == CURR_OPENING && garage_door.current_state == CURR_CLOSING) ||
              (current_state == CURR_CLOSING && garage_door.current_state == CURR_OPENING))
     {
@@ -1083,7 +1124,7 @@ void update_door_state(GarageDoorCurrentState current_state)
     if ((target_state != garage_door.target_state) ||
         (current_state != garage_door.current_state))
     {
-        ESP_LOGI(TAG, "Door state changing from %s to %s (target %s)", DOOR_STATE(garage_door.current_state), DOOR_STATE(current_state), DOOR_STATE(target_state));
+        ESP_LOGI(TAG, "Door state changing from %s to %s (target %s) (%s)", DOOR_STATE(garage_door.current_state), DOOR_STATE(current_state), DOOR_STATE(target_state), timeString());
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
     }
@@ -1267,8 +1308,7 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
         case 0x00:
             if (garage_door.current_state == CURR_CLOSED || garage_door.current_state == CURR_OPEN)
             {
-                ESP_LOGI(TAG, "Ignoring invalid door state change from %s to STOPPED (0x00)", (garage_door.current_state == CURR_CLOSED) ? "CLOSED" : "OPEN");
-                break;
+                ESP_LOGI(TAG, "Unusual door state change from %s to STOPPED (0x00)", (garage_door.current_state == CURR_CLOSED) ? "CLOSED" : "OPEN");
             }
             current_state = GarageDoorCurrentState::CURR_STOPPED;
             // door_moving = false;
@@ -1301,8 +1341,7 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
         case 0x06:
             if (garage_door.current_state == CURR_CLOSED || garage_door.current_state == CURR_OPEN)
             {
-                ESP_LOGI(TAG, "Ignoring invalid door state change from %s to STOPPED (0x06)", (garage_door.current_state == CURR_CLOSED) ? "CLOSED" : "OPEN");
-                break;
+                ESP_LOGI(TAG, "Unusual door state change from %s to STOPPED (0x06)", (garage_door.current_state == CURR_CLOSED) ? "CLOSED" : "OPEN");
             }
             current_state = GarageDoorCurrentState::CURR_STOPPED;
             // door_moving = false;
@@ -1345,7 +1384,7 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
                 if (garage_door.obstructed != status_obstructed)
                 {
                     // Obstruction state changed
-                    ESP_LOGI(TAG, "Obstruction: %s (Status packet) (%s)", status_obstructed ? "Obstructed" : "Clear", timeString());
+                    ESP_LOGD(TAG, "Obstruction: %s (Status packet) (%s)", status_obstructed ? "Obstructed" : "Clear", timeString());
                     notify_homekit_obstruction(status_obstructed);
                     digitalWrite(STATUS_OBST_PIN, !status_obstructed);
                 }
@@ -1399,6 +1438,12 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             ESP_LOGI(TAG, "Light: %s (%s)", lightState ? "On" : "Off", timeString());
             lastLightState = lightState;
             notify_homekit_light((bool)lightState);
+            // Force update of light state in any listening client
+            last_reported_garage_door.light = !garage_door.light;
+            // Clear pending light on/off flags as we have now received an update from the door about the light state
+            pendingLightOn = false;
+            pendingLightOff = false;
+            // If user want to trigger motion sensor based on light button, do it now as we know the light state has changed
             if (motionTriggers.bit.lightKey)
             {
                 notify_homekit_motion(true);
@@ -1412,7 +1457,6 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
         {
             ESP_LOGI(TAG, "Remotes lock: %s (%s)", LOCK_STATE(lockState), timeString());
             lastLockState = lockState;
-
             if (lockState)
             {
                 garage_door.current_lock = CURR_LOCKED;
@@ -1425,6 +1469,12 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             }
             notify_homekit_target_lock(garage_door.target_lock);
             notify_homekit_current_lock(garage_door.current_lock);
+            // Force update of lock state in any listening client
+            last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
+            // Clear pending lock on/off flags as we have now received an update from the door about the lock state
+            pendingLockOn = false;
+            pendingLockOff = false;
+            // If user want to trigger motion sensor based on lock button, do it now as we know the lock state has changed
             if (motionTriggers.bit.lockKey)
             {
                 notify_homekit_motion(true);
@@ -1743,7 +1793,7 @@ void comms_loop_sec2()
 
             if (pkt.m_data.value.status.light != garage_door.light)
             {
-                ESP_LOGD(TAG, "Light: %s (%s)", pkt.m_data.value.status.light ? "On" : "Off", timeString());
+                ESP_LOGI(TAG, "Light: %s (%s)", pkt.m_data.value.status.light ? "On" : "Off", timeString());
                 notify_homekit_light(pkt.m_data.value.status.light);
             }
 
@@ -1761,9 +1811,14 @@ void comms_loop_sec2()
             }
             if (current_lock != garage_door.current_lock)
             {
-                ESP_LOGD(TAG, "Remotes lock: %s (%s)", LOCK_STATE(current_lock), timeString());
+                ESP_LOGI(TAG, "Remotes lock: %s (%s)", LOCK_STATE(current_lock), timeString());
                 notify_homekit_target_lock(target_lock);
                 notify_homekit_current_lock(current_lock);
+                // Force update of lock state in any listening client
+                last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
+                // Clear pending lock on/off flags as we have now received an update from the door about the lock state
+                pendingLockOn = false;
+                pendingLockOff = false;
             }
 
             // Handle obstruction from status packet if pin-based detection not available
@@ -1780,21 +1835,6 @@ void comms_loop_sec2()
                     {
                         notify_homekit_motion(true);
                     }
-                }
-            }
-
-            if (stopSentClosePending)
-            {
-                if (_millis() - stopSentClosePending < 1000)
-                {
-                    // We sent a stop command, and have received a response from the GDO. So now will followup with the close command.
-                    stopSentClosePending = 0;
-                    close_door();
-                }
-                else
-                {
-                    stopSentClosePending = 0;
-                    ESP_LOGI(TAG, "Door did not respond to our stop command in time (1 second), do not send close command");
                 }
             }
 
@@ -1863,6 +1903,10 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Lock Cmd %d", lock);
                 notify_homekit_target_lock(lock);
+                // Clear pending lock on/off flags as we have now received an update from the door about the lock state
+                pendingLockOn = false;
+                pendingLockOff = false;
+                // If user want to trigger motion sensor based on lock button, do it now as we know the lock state has changed
                 if (motionTriggers.bit.lockKey)
                 {
                     notify_homekit_motion(true);
@@ -1894,6 +1938,10 @@ void comms_loop_sec2()
             {
                 ESP_LOGD(TAG, "Light Cmd %s", l ? "On" : "Off");
                 notify_homekit_light(l);
+                // Clear pending light on/off flags as we have now received an update from the door about the light state
+                pendingLightOn = false;
+                pendingLightOff = false;
+                // If user want to trigger motion sensor based on light button, do it now as we know the light state has changed
                 if (motionTriggers.bit.lightKey)
                 {
                     notify_homekit_motion(true);
@@ -1904,7 +1952,6 @@ void comms_loop_sec2()
 
         case PacketCommand::Motion:
         {
-            ESP_LOGD(TAG, "Motion Detected");
             // We got a motion message, so we know we have a motion sensor
             // If it's not yet enabled, add the service
             if (!garage_door.has_motion_sensor)
@@ -1920,7 +1967,11 @@ void comms_loop_sec2()
                 enable_service_homekit_motion(false); // ESP32 with HomeSpan can do this without reboot
 #endif
             }
-
+            if (!garage_door.motion)
+            {
+                // Only log if currently no motion detected. If we are already in motion detected state, then we have already logged it.
+                ESP_LOGI(TAG, "Motion: Detected (%s)", timeString());
+            }
             if (motionTriggers.bit.motion)
             {
                 if (!garage_door.light && !garage_door.motion)
@@ -1977,6 +2028,11 @@ void comms_loop_sec2()
         case PacketCommand::Obst2:
         {
             // The messages indicate some movement across the obstruction sensors.
+            /* Not sure we should trigger on this, use status message instead...
+            ESP_LOGD(TAG, "Obstruction: Obstructed (Obst packet) (%s)", timeString());
+            notify_homekit_obstruction(true);
+            digitalWrite(STATUS_OBST_PIN, false);
+            */
             if (motionTriggers.bit.obstruction)
             {
                 notify_homekit_motion(true);
@@ -2193,14 +2249,14 @@ void comms_loop()
     if (garage_door.room_occupied && (current_millis > garage_door.room_occupancy_timeout))
     {
         notify_homekit_room_occupancy(false);
-        ESP_LOGI(TAG, "Room occupancy cleared after %d minutes", userConfig->getOccupancyDuration() / 60);
+        ESP_LOGD(TAG, "Room occupancy cleared (%d minutes no activity)", userConfig->getOccupancyDuration() / 60);
     }
 #endif
     // Motion Clear Timer
     if (garage_door.motion && garage_door.motion_timer > 0 && (int32_t)(current_millis - garage_door.motion_timer) >= 0)
     {
         notify_homekit_motion(false);
-        ESP_LOGI(TAG, "Motion Cleared after %d seconds", MOTION_TIMER_DURATION / 1000);
+        ESP_LOGD(TAG, "Motion cleared (%d seconds no activity)", MOTION_TIMER_DURATION / 1000);
     }
 
 #ifndef USE_GDOLIB
@@ -2420,6 +2476,12 @@ bool process_PacketAction(PacketAction &pkt_ac)
 
 void door_command(DoorAction action)
 {
+    if (pendingDoorCommand)
+    {
+        ESP_LOGW(TAG, "Pending door command exists, dropping new command");
+        return;
+    }
+
     if (doorControlType != 3)
     {
         // SECURITY1.0/2.0 commands
@@ -2459,6 +2521,7 @@ void door_command(DoorAction action)
             ESP_LOGE(TAG, "packet queue full, dropping door command release pkt");
             return;
         }
+        pendingDoorCommand = true;
 
         // if sec+1.0, repeat the release
         if (doorControlType == 1)
@@ -2490,11 +2553,12 @@ void door_command_close()
 #else
     if (garage_door.pinModeObstructionSensor && !userConfig->getUseToggle())
     {
+        ESP_LOGD(TAG, "Closing door");
         door_command(DoorAction::Close);
     }
     else
     {
-        ESP_LOGI(TAG, "Toggle from current state: %s, target state: %s", DOOR_STATE(garage_door.current_state), DOOR_STATE(garage_door.target_state));
+        ESP_LOGD(TAG, "Toggle from current state: %s, target state: %s", DOOR_STATE(garage_door.current_state), DOOR_STATE(garage_door.target_state));
         if (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN)
         {
             door_command(DoorAction::Toggle);
@@ -2520,6 +2584,7 @@ void door_command_close()
                                        // If this timer fires (was not cancelled when we get notification that door has stopped) then
                                        // we probably missed a status mesage, assume it's closed.
                                        ESP_LOGW(TAG, "Door did not close in expected time, assuming it is closed");
+                                       pendingDoorCommand = false;
                                        notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_CLOSED);
                                        notify_homekit_target_door_state_change(GarageDoorTargetState::TGT_CLOSED);
                                        send_get_status(); // query in case we're wrong and it's stopped (Sec+2.0)
@@ -2527,20 +2592,21 @@ void door_command_close()
     }
     // Check door starts to close
     checkDoorMoving.detach(); // just in case!
-    checkDoorMoving.once_ms(2000, []()
+    checkDoorMoving.once_ms(3000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is closing) then
                                 // it is likely that there is an error and door did not move from its open state.
                                 checkDoorCompleted.detach();
+                                pendingDoorCommand = false;
                                 ESP_LOGE(TAG, "Door is supposed to be closing but is not.  Current state: %s", DOOR_STATE(garage_door.current_state));
-                                notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_OPEN);
-                                notify_homekit_target_door_state_change(GarageDoorTargetState::TGT_OPEN); });
+                                notify_homekit_current_door_state_change(garage_door.current_state); });
 #endif
     return;
 }
 
 void door_command_open()
 {
+    ESP_LOGI(TAG, "Opening door");
 #ifdef USE_GDOLIB
     if (doorControlType == 2 && userConfig->getBuiltInTTC())
         gdo_set_time_to_close(0);
@@ -2560,6 +2626,7 @@ void door_command_open()
                                        // If this timer fires (was not cancelled when we get notification that door has stopped) then
                                        // we probably missed a status mesage, assume it's open.
                                        ESP_LOGW(TAG, "Door did not open in expected time, assuming it is open");
+                                       pendingDoorCommand = false;
                                        notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_OPEN);
                                        notify_homekit_target_door_state_change(GarageDoorTargetState::TGT_OPEN);
                                        send_get_status(); // query in case we're wrong and it's stopped (Sec+2.0)
@@ -2567,14 +2634,14 @@ void door_command_open()
     }
     // Check door starts to open
     checkDoorMoving.detach(); // just in case!
-    checkDoorMoving.once_ms(2000, []()
+    checkDoorMoving.once_ms(3000, []()
                             {
                                 // If this timer fires (was not cancelled when we get notification that door is opening) then
                                 // it is likely that there is an error and door did not move from its closed state.
                                 checkDoorCompleted.detach();
+                                pendingDoorCommand = false;
                                 ESP_LOGE(TAG, "Door is supposed to be opening but is not.  Current state: %s", DOOR_STATE(garage_door.current_state));
-                                notify_homekit_current_door_state_change(GarageDoorCurrentState::CURR_CLOSED);
-                                notify_homekit_target_door_state_change(GarageDoorTargetState::TGT_CLOSED); });
+                                notify_homekit_current_door_state_change(garage_door.current_state); });
 #endif
     return;
 }
@@ -2595,12 +2662,12 @@ GarageDoorCurrentState open_door()
     }
 
     // safety
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN)
+    if (garage_door.current_state == GarageDoorCurrentState::CURR_OPEN || garage_door.current_state == GarageDoorCurrentState::CURR_OPENING)
     {
-        ESP_LOGI(TAG, "Door already open; ignored request");
+        ESP_LOGD(TAG, "Door already %s; ignored request", DOOR_STATE(garage_door.current_state));
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
-        return GarageDoorCurrentState::CURR_OPEN;
+        return garage_door.current_state;
     }
 
     if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING)
@@ -2609,13 +2676,50 @@ GarageDoorCurrentState open_door()
 #ifdef USE_GDOLIB
         gdo_door_stop();
 #else
+        checkDoorMoving.detach();
+        checkDoorCompleted.detach();
         door_command(DoorAction::Stop);
 #endif
+        if (userConfig->getReverseOnStop())
+        {
+            stopSentClosePending = 0;
+            stopSentOpenPending = _millis();
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Auto-reverse on stop is disabled, door will remain stopped until next command");
+        }
         return GarageDoorCurrentState::CURR_STOPPED;
     }
-    ESP_LOGI(TAG, "Opening door");
+#ifdef RATGDO_ENCODER
+    if (doorControlType == 3 && userConfig->getEncoderEnabled())
+        encoder_set_intended_open();
+#endif
     door_command_open();
     return GarageDoorCurrentState::CURR_OPENING;
+}
+
+GarageDoorCurrentState stop_door()
+{
+
+    if (!(garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING || garage_door.current_state == GarageDoorCurrentState::CURR_OPENING))
+    {
+        ESP_LOGI(TAG, "Door is not moving; ignored stop request");
+        // Reset last reported to we will update browser with actual state.
+        last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
+        return garage_door.current_state;
+    }
+
+    ESP_LOGI(TAG, "Door is moving; do stop");
+#ifdef USE_GDOLIB
+    gdo_door_stop();
+#else
+    checkDoorMoving.detach();
+    checkDoorCompleted.detach();
+    door_command(DoorAction::Stop);
+#endif
+
+    return GarageDoorCurrentState::CURR_STOPPED;
 }
 
 void TTCtimerFn(void (*callback)(), bool light, bool sound)
@@ -2726,12 +2830,12 @@ void delayFnCall(uint32_t ms, void (*callback)())
 
 GarageDoorCurrentState close_door(bool bypass_ttc)
 {
-    if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED)
+    if (garage_door.current_state == GarageDoorCurrentState::CURR_CLOSED || garage_door.current_state == GarageDoorCurrentState::CURR_CLOSING)
     {
-        ESP_LOGI(TAG, "Door already closed; ignored request");
+        ESP_LOGD(TAG, "Door already %s; ignored request", DOOR_STATE(garage_door.current_state));
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_state = (GarageDoorCurrentState)0xFF;
-        return GarageDoorCurrentState::CURR_CLOSED;
+        return garage_door.current_state;
     }
 
     cancel_builtin_TTC_countdown();
@@ -2742,15 +2846,25 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
 #ifdef USE_GDOLIB
         gdo_door_stop();
 #else
+        checkDoorMoving.detach();
+        checkDoorCompleted.detach();
         door_command(DoorAction::Stop);
 #endif
-        stopSentClosePending = _millis();
+        if (userConfig->getReverseOnStop())
+        {
+            stopSentClosePending = _millis();
+            stopSentOpenPending = 0;
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Auto-reverse on stop is disabled, door will remain stopped until next command");
+        }
         return GarageDoorCurrentState::CURR_STOPPED;
     }
 
     if (bypass_ttc && TTCtimer.active())
     {
-        ESP_LOGI(TAG, "Canceling TTC delay timer for hardwired control");
+        ESP_LOGD(TAG, "Canceling running TTC delay timer");
         TTCtimer.detach();
         set_light(TTCwasLightOn);
     }
@@ -2760,9 +2874,13 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
     {
         if (bypass_ttc && userConfig->getTTCseconds() != 0)
         {
-            ESP_LOGI(TAG, "Bypassing time-to-close delay for hardwired control");
+            ESP_LOGD(TAG, "Bypassing time-to-close delay");
         }
-        ESP_LOGI(TAG, "Closing door");
+        ESP_LOGD(TAG, "Closing door");
+#ifdef RATGDO_ENCODER
+        if (doorControlType == 3 && userConfig->getEncoderEnabled())
+            encoder_set_intended_close();
+#endif
         door_command_close();
     }
     else
@@ -2770,7 +2888,7 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
         if (TTCtimer.active())
         {
             // We are in a time-to-close delay timeout, cancel the timeout
-            ESP_LOGI(TAG, "Door in time-to-close delay, request to close ignored, TTC will continue");
+            ESP_LOGD(TAG, "Door in time-to-close delay, request to close ignored, TTC will continue");
             /* two closes in-a-row shoud not cancel TTC? Require an open request to cancel TTC
             ESP_LOGI(TAG, "Close: Canceling TTC delay timer");
             TTCtimer.detach();
@@ -2925,14 +3043,14 @@ bool set_lock(bool value, bool verify)
     // return value: true = lock state changed, else state unchanged
     if (verify && (garage_door.current_lock == ((value) ? LockCurrentState::CURR_LOCKED : LockCurrentState::CURR_UNLOCKED)))
     {
-        ESP_LOGI(TAG, "Remote locks already %s; ignored request", (value) ? "locked" : "unlocked");
+        ESP_LOGD(TAG, "Remote locks already %s; ignored request", (value) ? "locked" : "unlocked");
         // Reset last reported to we will update browser with actual state.
         last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
         return false;
     }
 
     garage_door.target_lock = (value) ? TGT_LOCKED : TGT_UNLOCKED;
-    ESP_LOGI(TAG, "Set Garage Door Remote locks: %s", (value) ? "locked" : "unlocked");
+    ESP_LOGD(TAG, "Set Garage Door Remote locks: %s", (value) ? "locked" : "unlocked");
     if (value)
         gdo_lock();
     else
@@ -2943,19 +3061,31 @@ bool set_lock(bool value, bool verify)
 bool set_lock(bool value, bool verify)
 {
     // return value: true = lock state changed, else state unchanged
-    if (verify && (garage_door.current_lock == ((value) ? LockCurrentState::CURR_LOCKED : LockCurrentState::CURR_UNLOCKED)))
+    if (verify)
     {
-        ESP_LOGI(TAG, "Remote locks already %s; ignored request", (value) ? "locked" : "unlocked");
-        // Reset last reported to we will update browser with actual state.
-        last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
-        return false;
+        if (garage_door.current_lock == ((value) ? LockCurrentState::CURR_LOCKED : LockCurrentState::CURR_UNLOCKED))
+        {
+            ESP_LOGD(TAG, "Remote locks already %s; ignored request", (value) ? "locked" : "unlocked");
+            // Reset last reported to we will update browser with actual state.
+            last_reported_garage_door.current_lock = (LockCurrentState)0xFF;
+            return false;
+        }
+        else if ((value && pendingLockOn) || (!value && pendingLockOff))
+        {
+            // We are already in the process of changing the lock state, so ignore duplicate request
+            ESP_LOGD(TAG, "Lock %s command already pending; ignored duplicate request", (value) ? "lock" : "unlock");
+            return false;
+        }
     }
 
     PacketData data;
     data.type = PacketDataType::Lock;
     data.value.lock.lock = (value) ? LockState::On : LockState::Off;
     garage_door.target_lock = (value) ? TGT_LOCKED : TGT_UNLOCKED;
-    ESP_LOGI(TAG, "Set Garage Door Remote locks: %s", (value) ? "locked" : "unlocked");
+    ESP_LOGD(TAG, "Set Garage Door Remote locks: %s", (value) ? "locked" : "unlocked");
+
+    pendingLockOn = (value == true);
+    pendingLockOff = (value == false);
 
     // SECURITY1.0
     if (doorControlType == 1)
@@ -3003,7 +3133,7 @@ bool set_lock(bool value, bool verify)
 #ifdef USE_GDOLIB
 bool set_light(bool value, bool verify)
 {
-    ESP_LOGI(TAG, "Set Garage Door Light: %s", (value) ? "on" : "off");
+    ESP_LOGD(TAG, "Set Garage Door Light: %s", (value) ? "on" : "off");
     if (value)
         gdo_light_on_check(verify);
     else
@@ -3058,15 +3188,27 @@ void sec1_light_release(uint8_t howManyReleases, uint32_t delay)
 bool set_light(bool value, bool verify)
 {
     // return value: true = light state changed, else state unchanged
-    if (verify && (garage_door.light == value))
+    if (verify)
     {
-        ESP_LOGI(TAG, "Light already %s; ignored request", (value) ? "on" : "off");
-        // Reset last reported to we will update browser with actual state.
-        last_reported_garage_door.light = !value;
-        return false;
+        if (garage_door.light == value)
+        {
+            ESP_LOGD(TAG, "Light already %s; ignored request", (value) ? "on" : "off");
+            // Reset last reported so we will update browser with actual state.
+            last_reported_garage_door.light = !value;
+            return false;
+        }
+        else if ((value && pendingLightOn) || (!value && pendingLightOff))
+        {
+            // We have already sent a command to change the light, but haven't received confirmation yet.  Don't send another command.
+            ESP_LOGD(TAG, "Light %s command already pending; ignored duplicate request", (value) ? "on" : "off");
+            return false;
+        }
     }
 
-    ESP_LOGI(TAG, "Set Garage Door Light: %s", (value) ? "on" : "off");
+    ESP_LOGD(TAG, "Set Garage Door Light: %s", (value) ? "on" : "off");
+
+    pendingLightOn = (value == true);
+    pendingLightOff = (value == false);
 
     // SECURITY+1.0
     if (doorControlType == 1)
@@ -3113,15 +3255,15 @@ void manual_recovery()
     // go to WiFi recovery mode
     if (force_recover.push_count++ == 0)
     {
-        ESP_LOGI(TAG, "Push count start");
+        ESP_LOGD(TAG, "Push count start");
         force_recover.timeout = _millis() + 3000;
     }
     else if ((int32_t)(_millis() - force_recover.timeout) > 0)
     {
-        ESP_LOGI(TAG, "Push count reset");
+        ESP_LOGD(TAG, "Push count reset");
         force_recover.push_count = 0;
     }
-    ESP_LOGI(TAG, "Push count %d", force_recover.push_count);
+    ESP_LOGD(TAG, "Push count %d", force_recover.push_count);
 
     if (force_recover.push_count >= 5)
     {
@@ -3182,7 +3324,7 @@ void obstruction_timer()
             // Only update if we are changing state
             if (garage_door.obstructed)
             {
-                ESP_LOGI(TAG, "Obstruction: Clear (ISR) (%s)", timeString());
+                ESP_LOGD(TAG, "Obstruction: Clear (ISR) (%s)", timeString());
                 notify_homekit_obstruction(false);
                 digitalWrite(STATUS_OBST_PIN, HIGH);
             }
@@ -3216,7 +3358,7 @@ void obstruction_timer()
                     // Only update if we are changing state
                     if (!garage_door.obstructed)
                     {
-                        ESP_LOGI(TAG, "Obstruction: Detected (ISR) (%s)", timeString());
+                        ESP_LOGD(TAG, "Obstruction: Detected (ISR) (%s)", timeString());
                         notify_homekit_obstruction(true);
                         digitalWrite(STATUS_OBST_PIN, LOW);
                         if (motionTriggers.bit.obstruction)

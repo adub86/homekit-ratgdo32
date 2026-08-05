@@ -4,20 +4,51 @@
 
 All notable changes to `homekit-ratgdo32` will be documented in this file. This project tries to adhere to [Semantic Versioning](http://semver.org/).
 
-## v3.4.5 (2026-05-??)
+## v3.5.1 (2026-07-22)
 
 ### What's Changed
 
-* Bugfix: Make setting timezone more robust, (https://github.com/ratgdo/homekit-ratgdo32/issues/158)
-* Feature: RATGDO32-DISCO only, add option to disable beeping on time-to-close, https://github.com/ratgdo/homekit-ratgdo32/issues/165
-* Other: ESP32 only, update HomeSpan library to version 2.1.8
+* Bugfix: Fix false encoder-stopped watchdog trigger from stale timestamp in encoder.cpp, https://github.com/ratgdo/homekit-ratgdo32/pull/184 
+* Bugfix: Fix regression that accidentally removed option to remove light switch from HomeKit, https://github.com/ratgdo/homekit-ratgdo/pull/350
+* Other: Move more Info-level log messages to Debug-level so that once in stable run mode, Info-level only logs actual activity.
 
 ### Known Issues
 
 * ESP32 (ratgdo32) only... Some users may get an error during OTA upload that firmware is too large for the OTA partition. See [README.md](https://github.com/ratgdo/homekit-ratgdo32/blob/main/README.md#upgrade-failures) for work-around.
 * Sec+ 1.0 doors with digital wall panel (e.g. 889LM) sometimes do not close after a time-to-close delay. Please watch your door to make sure it closes after TTC delay.
 * Sec+ 1.0 doors with "0x37" digital wall panel (e.g. 398LM) not working.  We now detect but will not support them. Recommend replacing with 889LM panel.
-* When creating automations in Apple Home the garage door may show only lock/unlock and not open/close as triggers. This is a bug in Apple Home. Workaround is to use the Eve App to create the automation, it will show both options.
+* When creating automations in Apple Home, the garage door may show only lock/unlock and not open/close as triggers. This is a bug in Apple Home. Workaround is to use the Eve App to create the automation, it will show both options.
+
+## v3.5.0 (2026-07-12)
+
+### What's Changed
+
+* Feature: Added option to hide light accessory to the ESP8266 build,  https://github.com/ratgdo/homekit-ratgdo/pull/346
+* Feature: Added support for the [ratgdo encoder](https://ratcloud.llc/products/ratgdo-encoder)
+* Bugfix: ratgdo calibration not working from web page, https://github.com/ratgdo/homekit-ratgdo32/issues/180
+* Other: Remove use of std::map for configuration settings, replace with array of structs, to lower memory use.
+* Other: Move some Info-level log messages to Debug-level so that once in stable run mode, Info-level only logs actual activity.
+
+## v3.4.6 (2026-06-20)
+
+### What's Changed
+
+* Bugfix: Debounce door open/close commands https://github.com/ratgdo/homekit-ratgdo32/issues/177
+
+## v3.4.5 (2026-06-06)
+
+### What's Changed
+
+* Bugfix: Make setting timezone more robust, (https://github.com/ratgdo/homekit-ratgdo32/issues/158)
+* Bugfix: Sec+1.0 don't stop door on open/close request if already opening/closing, https://github.com/ratgdo/homekit-ratgdo32/issues/159
+* Bugfix: Web interface light on/off status not updating correctly when light turned on/off from the webpage
+* Bugfix: Free-slot scan misses free slots, https://github.com/ratgdo/homekit-ratgdo32/issues/170
+* Bugfix: Debounce light on/off and remote lock on/off when two requests come in rapid succession
+* Bugfix: Allow user to reverse direction of door from HomeKit while it is opening or closing
+* Feature: Add user option for automatic door reversal on stop, https://github.com/ratgdo/homekit-ratgdo/issues/341
+* Feature: RATGDO32-DISCO only, add option to disable beeping on time-to-close, https://github.com/ratgdo/homekit-ratgdo32/issues/165
+* Feature: RATGDO32 only, add support for Paul's ratgdo encoder, https://github.com/ratgdo/homekit-ratgdo32/pull/175
+* Other: ESP32 only, update HomeSpan library to version 2.1.8
 
 ## v3.4.4 (2026-02-19)
 

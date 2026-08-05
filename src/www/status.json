@@ -67,6 +67,7 @@
   "closeDuration": 20,
   "dcOpenClose": false,
   "dcBypassTTC": false,
+  "reverseOnStop": true,
   "useToggle": true,
   "useSWserial": true,
   "TTClight": true,
@@ -75,5 +76,6 @@
   "occupancyDuration": 300,
   "lightHomeKit": true,
   "motionHomeKit": true,
+  "stopDoorHomeKit": false,
   "garageSec1Emulated": false
 }
