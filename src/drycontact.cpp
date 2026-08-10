@@ -24,6 +24,7 @@
 static const char *TAG = "ratgdo-drycontact";
 
 static bool drycontact_setup_done = false;
+static bool encoder_enabled = false;
 
 void onOpenSwitchPress();
 void onCloseSwitchPress();
@@ -64,6 +65,7 @@ void setup_drycontact()
 #ifdef RATGDO_ENCODER
     if (userConfig->getEncoderEnabled())
     {
+        encoder_enabled = true;
         // Encoder takes over open/close pins — only attach the light button
         buttonLight.attachPress(onLightSwitchPress);
         buttonLight.attachLongPressStop(onLightSwitchRelease);
@@ -89,7 +91,7 @@ void drycontact_loop()
 
     // Poll OneButton objects (light always polled; open/close polled only when encoder not active)
 #ifdef RATGDO_ENCODER
-    if (userConfig->getEncoderEnabled())
+    if (encoder_enabled)
     {
         buttonLight.tick();
         if (dryContactLightToggle)
