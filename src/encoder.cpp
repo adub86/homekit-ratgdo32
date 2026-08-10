@@ -448,7 +448,10 @@ void setup_encoder()
     return;
 
   if (!userConfig->getEncoderEnabled())
+  {
+    enable_service_homekit_manually_operated(false);
     return;
+  }
 
   enc_load_cal();
 
@@ -497,6 +500,7 @@ void setup_encoder()
            DRY_CONTACT_OPEN_PIN, DRY_CONTACT_CLOSE_PIN,
            userConfig->getEncoderReversed());
 
+  enable_service_homekit_manually_operated(true);
   encoder_setup_done = true;
 }
 
