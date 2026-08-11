@@ -24,7 +24,9 @@
 static const char *TAG = "ratgdo-drycontact";
 
 static bool drycontact_setup_done = false;
+#ifdef RATGDO_ENCODER
 static bool encoder_enabled = false;
+#endif
 
 void onOpenSwitchPress();
 void onCloseSwitchPress();
