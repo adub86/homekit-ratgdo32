@@ -41,6 +41,7 @@ static bool enc_min_cal_ = false;
 static bool enc_max_cal_ = false;
 
 // Direction tracking (for stopped-watchdog and reverse detection)
+static bool reversed = false; // userConfig->getEncoderReversed()
 static int8_t enc_travel_dir_ = 0; // dominant direction this move (+1/-1)
 static int8_t enc_reverse_count_ = 0;
 static int8_t enc_last_dir_ = 0;
@@ -259,8 +260,6 @@ static void on_encoder_update(int16_t raw)
 
   ESP_LOGD(TAG, "Encoder step=%d min=%d max=%d", raw, enc_min_, enc_max_);
 
-  bool reversed = userConfig->getEncoderReversed();
-
   if (enc_min_cal_ && enc_max_cal_ && enc_max_ != enc_min_)
   {
     float pos = (float)(raw - enc_min_) / (float)(enc_max_ - enc_min_);
@@ -317,7 +316,6 @@ static void check_encoder_stopped()
   ESP_LOGI(TAG, "Encoder stopped: step=%d min=%d max=%d dir=%d", enc_last_,
            enc_min_, enc_max_, enc_travel_dir_);
 
-  bool reversed = userConfig->getEncoderReversed();
   bool decreasing = (enc_travel_dir_ < 0);
 
   enc_travel_dir_ = 0;
@@ -452,6 +450,7 @@ void setup_encoder()
     enable_service_homekit_manually_operated(false);
     return;
   }
+  reversed = userConfig->getEncoderReversed();
 
   enc_load_cal();
 
@@ -472,7 +471,6 @@ void setup_encoder()
   // Derive initial door state from saved calibration if available
   if (enc_min_cal_ && enc_max_cal_ && enc_max_ != enc_min_)
   {
-    bool reversed = userConfig->getEncoderReversed();
     int16_t target_closed = reversed ? enc_max_ : enc_min_;
     int16_t target_open = reversed ? enc_min_ : enc_max_;
     int16_t d_closed = (int16_t)abs(enc_last_ - target_closed);
@@ -497,8 +495,7 @@ void setup_encoder()
 
   enc_watchdog_armed_ = false;
   ESP_LOGI(TAG, "Encoder ISR attached: A=GPIO%d B=GPIO%d reversed=%d",
-           DRY_CONTACT_OPEN_PIN, DRY_CONTACT_CLOSE_PIN,
-           userConfig->getEncoderReversed());
+           DRY_CONTACT_OPEN_PIN, DRY_CONTACT_CLOSE_PIN, reversed);
 
   enable_service_homekit_manually_operated(true);
   encoder_setup_done = true;
