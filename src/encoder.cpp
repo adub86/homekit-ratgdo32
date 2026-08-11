@@ -41,7 +41,7 @@ static bool enc_min_cal_ = false;
 static bool enc_max_cal_ = false;
 
 // Direction tracking (for stopped-watchdog and reverse detection)
-static bool reversed = false; // userConfig->getEncoderReversed()
+static bool reversed = false;      // userConfig->getEncoderReversed()
 static int8_t enc_travel_dir_ = 0; // dominant direction this move (+1/-1)
 static int8_t enc_reverse_count_ = 0;
 static int8_t enc_last_dir_ = 0;
@@ -161,7 +161,7 @@ static void encoder_received(GarageDoorCurrentState door_state)
 
   if (proto_state == (GarageDoorCurrentState)0xFF)
   {
-    update_door_state(door_state, true);
+    update_door_state(door_state);
     return;
   }
 
@@ -179,7 +179,7 @@ static void encoder_received(GarageDoorCurrentState door_state)
         garage_door.manuallyOperated = true;
         notify_homekit_manually_operated(true);
       }
-      update_door_state(door_state, true);
+      update_door_state(door_state);
     }
   }
   else
@@ -189,7 +189,7 @@ static void encoder_received(GarageDoorCurrentState door_state)
     {
       if (garage_door.manuallyOperated)
       {
-        update_door_state(door_state, true);
+        update_door_state(door_state);
       }
     }
   }
@@ -217,6 +217,7 @@ void protocol_received_state(GarageDoorCurrentState door_state)
       if (door_state != garage_door.encoder_door_state)
       {
         // Drop update, rely on encoder until we see motion from protocol
+        return;
       }
       else
       {
@@ -225,6 +226,7 @@ void protocol_received_state(GarageDoorCurrentState door_state)
       }
     }
   }
+  update_door_state(door_state);
 }
 
 // ─── on_encoder_update ───────────────────────────────────────────────────────
@@ -507,7 +509,7 @@ void encoder_loop()
     return;
 
   // Drain ISR delta every ~100 ms
-  static uint32_t last_drain_ms = 0;
+  static _millis_t last_drain_ms = 0;
   _millis_t now = _millis();
 
   if (now - last_drain_ms >= 100)
@@ -554,8 +556,7 @@ void reset_encoder_cal()
 
   EncCalBlob b = {};
   write_door_data(nvram_enc_cal, &b, sizeof(b));
-  ESP_LOGI(TAG, "Encoder calibration cleared; will re-learn on next full "
-                "open/close cycle");
+  ESP_LOGI(TAG, "Encoder calibration cleared; will re-learn on next full open/close cycle");
 }
 
 void encoder_set_intended_open() { enc_intended_dir_ = 1; }

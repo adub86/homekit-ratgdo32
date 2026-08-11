@@ -46,6 +46,10 @@ static const char *TAG = "ratgdo-comms";
 
 bool comms_setup_done = false;
 
+#ifdef RATGDO_ENCODER
+static bool encoder_enabled = false;
+#endif // RATGDO_ENCODER
+
 /********************************** LOCAL STORAGE *****************************************/
 #ifndef USE_GDOLIB
 struct __attribute__((aligned(4))) PacketAction
@@ -787,6 +791,10 @@ void setup_comms()
     ESP_LOGI(TAG, "Door close history (%d): %lums, %lums, %lums, %lums, %lums, %lums; Median: %dsecs", closeHistory.count,
              closeHistory(1), closeHistory(2), closeHistory(3), closeHistory(4), closeHistory(5), closeHistory(6), garage_door.closeDuration);
 
+#ifdef RATGDO_ENCODER
+    encoder_enabled = userConfig->getEncoderEnabled();
+#endif // RATGDO_ENCODER
+
     comms_setup_done = true;
 }
 
@@ -962,7 +970,19 @@ void wallPlate_Emulation()
     }
 }
 
-void update_door_state(GarageDoorCurrentState current_state, bool fromEncoder)
+inline void handle_protocol_door_state(GarageDoorCurrentState state)
+{
+#ifdef RATGDO_ENCODER
+    if (encoder_enabled)
+    {
+        protocol_received_state(state);
+        return;
+    }
+#endif
+    update_door_state(state);
+}
+
+void update_door_state(GarageDoorCurrentState current_state)
 {
     static _millis_t start_opening = 0;
     static _millis_t start_closing = 0;
@@ -1133,13 +1153,6 @@ void update_door_state(GarageDoorCurrentState current_state, bool fromEncoder)
         notify_homekit_current_door_state_change(current_state);
         notify_homekit_target_door_state_change(target_state);
     }
-#ifdef RATGDO_ENCODER
-    // Inform the encoder of current state, so it knows that state is being received from comms protocol.
-    if (fromEncoder == false)
-    {
-        protocol_received_state(current_state);
-    }
-#endif
     // Update the global
     doorState = current_state;
 }
@@ -1362,7 +1375,7 @@ void sec1_process_message(uint8_t key, uint8_t value = 0xFF)
             current_state = (GarageDoorCurrentState)0xFF;
             break;
         }
-        update_door_state(current_state);
+        handle_protocol_door_state(current_state);
 
         if (!comms_status_done)
         {
@@ -1800,7 +1813,7 @@ void comms_loop_sec2()
                 current_state = (GarageDoorCurrentState)0xFF;
                 break;
             }
-            update_door_state(current_state);
+            handle_protocol_door_state(current_state);
 
             if (pkt.m_data.value.status.light != garage_door.light)
             {
@@ -1873,12 +1886,12 @@ void comms_loop_sec2()
             case GarageDoorCurrentState::CURR_OPEN:
                 // If last known state was open, then we missed that packet and should be in closing state.
                 ESP_LOGI(TAG, "Door moving from OPEN state but we missed the notification packet. Update our state to CLOSING");
-                update_door_state(GarageDoorCurrentState::CURR_CLOSING);
+                handle_protocol_door_state(GarageDoorCurrentState::CURR_CLOSING);
                 break;
             case GarageDoorCurrentState::CURR_CLOSED:
                 // If last known state was open, then we missed that packet and should be in closing state.
                 ESP_LOGI(TAG, "Door moving from CLOSED state but we missed the notification packet. Update our state to OPENING");
-                update_door_state(GarageDoorCurrentState::CURR_OPENING);
+                handle_protocol_door_state(GarageDoorCurrentState::CURR_OPENING);
                 break;
             default:
                 break;
@@ -2244,7 +2257,7 @@ void comms_loop_drycontact()
     if (doorState != previousDoorState)
     {
         previousDoorState = doorState;
-        update_door_state(doorState);
+        handle_protocol_door_state(doorState);
     }
 }
 #endif
@@ -2703,7 +2716,7 @@ GarageDoorCurrentState open_door()
         return GarageDoorCurrentState::CURR_STOPPED;
     }
 #ifdef RATGDO_ENCODER
-    if (userConfig->getEncoderEnabled())
+    if (encoder_enabled)
         encoder_set_intended_open();
 #endif
     door_command_open();
@@ -2889,7 +2902,7 @@ GarageDoorCurrentState close_door(bool bypass_ttc)
         }
         ESP_LOGD(TAG, "Closing door");
 #ifdef RATGDO_ENCODER
-        if (userConfig->getEncoderEnabled())
+        if (encoder_enabled)
             encoder_set_intended_close();
 #endif
         door_command_close();
